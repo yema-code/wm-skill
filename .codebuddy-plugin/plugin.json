@@ -1,0 +1,18 @@
+{
+  "name": "skill-wm",
+  "version": "1.0.1",
+  "description": "WorkBuddy Skill for foreign-trade B2B lead generation, outreach, due diligence, campaigns, and CRM.",
+  "author": {
+    "name": "yema"
+  },
+  "category": "skill",
+  "keywords": [
+    "workbuddy",
+    "foreign-trade",
+    "b2b",
+    "lead-generation",
+    "outreach",
+    "crm",
+    "wm"
+  ]
+}
