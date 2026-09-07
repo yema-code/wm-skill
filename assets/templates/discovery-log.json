@@ -1,0 +1,14 @@
+{
+  "country": "United States",
+  "discovery_source": "importyeti",
+  "source_query": "Replace with the actual supported search and dataset",
+  "source_url": "https://trade-source.example/company/example",
+  "observed_at": "2026-09-07",
+  "verification_status": "review",
+  "company_name": "Example Home",
+  "official_domain": "",
+  "shipment_signal": "",
+  "supplier_signal": "",
+  "unknowns": ["Confirm the legal buyer and official website"],
+  "next_action": "Verify the original source and company identity before CRM import"
+}

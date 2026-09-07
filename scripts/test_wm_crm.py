@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import wm_crm
+
 
 SCRIPT = Path(__file__).with_name("wm_crm.py")
 
@@ -284,6 +286,109 @@ class WmCrmTest(unittest.TestCase):
         with (out_dir / "campaign_plans.csv").open(encoding="utf-8-sig", newline="") as stream:
             campaign_rows = list(csv.DictReader(stream))
         self.assertEqual(campaign_rows[0]["campaign_type"], "prospecting")
+
+    def test_source_selection_roundtrip_and_validation(self):
+        self.run_cli("init", "--db", self.db, "--project-name", "US Bedding",
+                     "--product", "bedding", "--countries", "United States")
+        payload = {"lead_sources": ["google", "importyeti", "google"],
+                   "source_selection": "operator_choice", "source_notes": "US ocean imports"}
+        result = self.run_cli("set-project", "--db", self.db,
+                              "--json-file", self.write_json("sources.json", payload))
+        self.assertEqual(result["project"]["lead_sources"], ["google", "importyeti"])
+        for sources, selection in ((["unsupported"], "operator_choice"),
+                                   ([], "operator_choice"), (["google"], "pending"),
+                                   ([{}], "operator_choice")):
+            self.run_cli("set-project", "--db", self.db, "--json-file",
+                         self.write_json("invalid-sources.json", {
+                             "lead_sources": sources, "source_selection": selection}), expected=2)
+        result = self.run_cli("set-project", "--db", self.db, "--json-file",
+                              self.write_json("notes.json", {"notes": "Keep source choices"}))
+        self.assertEqual(result["project"]["source_notes"], "US ocean imports")
+        self.assertEqual(result["project"]["lead_sources"], ["google", "importyeti"])
+        out_dir = self.root / "export"
+        self.run_cli("export", "--db", self.db, "--out-dir", out_dir)
+        with (out_dir / "project.csv").open(encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(json.loads(row["lead_sources"]), ["google", "importyeti"])
+        self.assertTrue(self.run_cli("validate", "--db", self.db)["ok"])
+
+    def test_legacy_schema_migration_is_additive_and_idempotent(self):
+        self.db.parent.mkdir(parents=True)
+        with sqlite3.connect(self.db) as conn:
+            conn.executescript(wm_crm.SCHEMA)
+            conn.execute("""INSERT INTO project VALUES
+                         (1, 'Legacy', 'bedding', '["Germany"]', '[]', '[]',
+                          'search', 80, 'preserve this', 'old-created', 'old-updated')""")
+            before = conn.execute("SELECT * FROM project").fetchone()
+            self.assertNotIn("lead_sources", {r[1] for r in conn.execute("PRAGMA table_info(project)")})
+        for _ in range(2):
+            project = self.run_cli("status", "--db", self.db)["project"]
+            self.assertEqual(project["lead_sources"], [])
+            self.assertEqual(project["source_selection"], "pending")
+        with sqlite3.connect(self.db) as conn:
+            after = conn.execute("SELECT * FROM project").fetchone()
+            self.assertEqual(after[:len(before)], before)
+            fields = {r[1] for r in conn.execute("PRAGMA table_info(social_profiles)")}
+            self.assertTrue({"country", "language", "public_handle", "source_url"} <= fields)
+
+    def test_messaging_platforms_in_social_outreach_and_activation(self):
+        self.run_cli("init", "--db", self.db, "--project-name", "Global Bedding",
+                     "--product", "bedding", "--countries", "Vietnam")
+        self.run_cli("upsert-company", "--db", self.db, "--json-file",
+                     self.write_json("company.json", {"name": "Example Home", "website": "https://buyer.example"}))
+        platforms = ("zalo", "line", "vk", "telegram", "wechat", "kakaotalk", "viber", "messenger", "instagram_dm")
+        for platform in platforms:
+            with self.subTest(platform=platform):
+                self.run_cli("upsert-social", "--db", self.db, "--json-file",
+                             self.write_json("social.json", {
+                                 "entity_type": "company", "entity_key": "buyer.example", "platform": platform,
+                                 "profile_url": "https://social.example/business", "verification_status": "official_linked",
+                                 "country": "Vietnam", "language": "vi", "source_url": "https://buyer.example/contact",
+                                 "last_checked_at": "2026-09-07"}))
+                self.run_cli("upsert-outreach", "--db", self.db, "--json-file",
+                             self.write_json("outreach.json", {
+                                 "company_domain": "buyer.example", "contact_label": f"Business {platform}",
+                                 "mode": "first_touch", "channel": platform, "route_confidence": "low",
+                                 "status": "draft", "message": "Draft only", "cta": "Confirm department",
+                                 "next_action": "Review route and permission", "evidence_refs": ["https://buyer.example/contact"]}))
+                self.run_cli("upsert-activation", "--db", self.db, "--json-file",
+                             self.write_json("activation.json", {
+                                 "company_domain": "buyer.example", "contact_label": f"Business {platform}",
+                                 "lifecycle_stage": "engaged", "status": "paused", "channel": platform,
+                                 "last_outbound_at": "2026-09-01", "next_action": "Human review only"}))
+        self.assertTrue(self.run_cli("validate", "--db", self.db)["ok"])
+        self.assertEqual(self.run_cli("status", "--db", self.db)["social_profiles"], len(platforms))
+
+    def test_handle_only_social_requires_evidence_and_exports(self):
+        self.run_cli("init", "--db", self.db, "--project-name", "Handles",
+                     "--product", "bedding", "--countries", "China")
+        self.run_cli("upsert-company", "--db", self.db, "--json-file",
+                     self.write_json("company.json", {"name": "Example Home", "website": "https://buyer.example"}))
+        social = {"entity_type": "company", "entity_key": "buyer.example", "platform": "wechat",
+                  "profile_url": "", "public_handle": "example_business", "verification_status": "official_linked",
+                  "country": "China", "language": "zh", "last_checked_at": "2026-09-07"}
+        self.run_cli("upsert-social", "--db", self.db, "--json-file",
+                     self.write_json("social.json", social), expected=2)
+        social["source_url"] = "https://buyer.example/contact"
+        first = self.run_cli("upsert-social", "--db", self.db, "--json-file", self.write_json("social.json", social))
+        for key in ("country", "language", "public_handle", "source_url"):
+            self.assertEqual(first["social_profile"][key], social[key])
+        update = {k: v for k, v in social.items() if k not in {"country", "language", "public_handle", "source_url"}}
+        second = self.run_cli("upsert-social", "--db", self.db, "--json-file", self.write_json("update.json", update))
+        self.assertEqual(second["social_profile"]["id"], first["social_profile"]["id"])
+        self.assertEqual(second["social_profile"]["public_handle"], "example_business")
+        social["verification_status"] = "not_found"
+        self.run_cli("upsert-social", "--db", self.db, "--json-file",
+                     self.write_json("missing.json", social), expected=2)
+        out_dir = self.root / "export"
+        self.run_cli("export", "--db", self.db, "--out-dir", out_dir)
+        with (out_dir / "social_profiles.csv").open(encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["public_handle"], "example_business")
+        self.assertEqual(row["source_url"], "https://buyer.example/contact")
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE social_profiles SET source_url=''")
+        self.assertFalse(self.run_cli("validate", "--db", self.db, expected=1)["ok"])
 
     def test_activation_stop_conditions_are_enforced(self):
         self.run_cli(

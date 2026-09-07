@@ -6,5 +6,8 @@
   "exclusions": ["consumer", "marketplace-only seller"],
   "stage": "prepare",
   "qualify_threshold": 80,
+  "lead_sources": [],
+  "source_selection": "pending",
+  "source_notes": "Ask the operator to choose sources for each target market.",
   "notes": "Replace sample values with verified project requirements."
 }

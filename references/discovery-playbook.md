@@ -2,6 +2,8 @@
 
 本文件只在设计搜索式、补充候选来源或排查搜索覆盖不足时读取。评分和证据标准仍以 [research-quality.md](research-quality.md) 为准。
 
+美国目标市场先按 [us-lead-sources.md](us-lead-sources.md) 选择 Google、ImportYeti 或组合；其他市场和行业社区按 [global-messaging.md](global-messaging.md) 路由。来源选择保存到项目 `lead_sources`，不能把聊天工具、企业目录和当前采购公告混为同一来源类型。
+
 ## 查询族
 
 把产品、买家角色、采购/渠道意图、地理位置、本地语言和排除词组合成查询族；不要只反复替换产品同义词。

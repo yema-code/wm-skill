@@ -44,6 +44,18 @@ python3 scripts/wm_crm.py export --db .wm/wm.db --out-dir .wm/export
 
 `stage` 取值：`prepare`、`search`、`contacts`、`contact_details`、`research`、`outreach`、`export`。
 
+1.0.2 增加 `lead_sources`、`source_selection`、`source_notes`。来源允许 `google`、`importyeti`、`canadian_importers_database`、`industry_directory`、`community`、`other`。未选择为 `[]` + `pending`；选择后为非空来源数组 + `operator_choice`，重复来源自动去重。更新其他项目字段不会清空已有来源选择。
+
+```json
+{
+  "lead_sources": ["google", "importyeti"],
+  "source_selection": "operator_choice",
+  "source_notes": "US ocean imports; record actual dataset and observation dates."
+}
+```
+
+来源选择只保存研究配置，不启动联网或调用外部服务。多国项目在 `source_notes` 说明各国对应来源；详细查询和未确认实体用 `assets/templates/discovery-log.json` 保存于项目目录，该日志不是 CLI 导入对象。公司证据仍逐条用 `add-evidence` 保存。
+
 ## 公司对象
 
 ```json
@@ -127,7 +139,11 @@ python3 scripts/wm_crm.py export --db .wm/wm.db --out-dir .wm/export
 }
 ```
 
-`entity_type` 取值 `company` 或 `competitor`。`platform` 取值 `linkedin`、`facebook`、`instagram`、`tiktok`、`pinterest`、`youtube`、`x`、`whatsapp` 或 `other`。`verification_status` 取值 `official_linked`、`claimed_unverified` 或 `not_found`；`activity_status` 取值 `not_checked`、`recently_active`、`inactive` 或 `not_found`。
+`entity_type` 取值 `company` 或 `competitor`。`platform` 取值 `linkedin`、`facebook`、`instagram`、`tiktok`、`pinterest`、`youtube`、`x`、`whatsapp`、`zalo`、`line`、`vk`、`telegram`、`wechat`、`kakaotalk`、`viber`、`messenger`、`instagram_dm` 或 `other`。`verification_status` 取值 `official_linked`、`claimed_unverified` 或 `not_found`；`activity_status` 取值 `not_checked`、`recently_active`、`inactive` 或 `not_found`。
+
+新增可选文本字段 `country`、`language`、`public_handle`、`source_url`，保存市场、语言、公开业务 ID 与归属证据页。更新主账号时省略这四个字段会保留原值，显式空字符串表示清空。只有业务 ID 而无主页时可以将 `profile_url` 留空，但 `public_handle` 必须有 `source_url` 与 `last_checked_at`；`not_found` 不得同时保存 URL/ID。
+
+企业主账号仍按实体与平台 upsert；多个个人联系人使用 `contacts` 与联系人级证据，不用主账号相互覆盖。`official_linked` 只标账号归属，不代表采购权或营销许可；联系依据、拒收与未知项保存于计划 notes/证据，由操作者复核。所有新增字段随 `social_profiles.csv` 导出。
 
 ## 证据对象
 
@@ -169,7 +185,7 @@ python3 scripts/wm_crm.py export --db .wm/wm.db --out-dir .wm/export
 }
 ```
 
-`mode` 取值 `first_touch`、`reengagement`、`quote` 或 `post_sale`。`channel` 取值 `email`、`linkedin`、`whatsapp`、`official_form`、`phone` 或 `other`；`company_size` 取值 `micro`、`small`、`medium`、`large` 或 `unknown`；`route_confidence` 取值 `high`、`medium`、`low` 或 `blocked`；`status` 取值 `draft`、`review_ready`、`approved`、`sent`、`replied`、`paused` 或 `closed`。
+`mode` 取值 `first_touch`、`reengagement`、`quote` 或 `post_sale`。`channel` 取值 `email`、`linkedin`、`whatsapp`、`zalo`、`line`、`vk`、`telegram`、`wechat`、`kakaotalk`、`viber`、`messenger`、`instagram_dm`、`official_form`、`phone` 或 `other`；`company_size` 取值 `micro`、`small`、`medium`、`large` 或 `unknown`；`route_confidence` 取值 `high`、`medium`、`low` 或 `blocked`；`status` 取值 `draft`、`review_ready`、`approved`、`sent`、`replied`、`paused` 或 `closed`。
 
 已知联系人使用脚本返回的 `contact_id`；没有个人联系人时省略它，并用 `contact_label` 说明官网采购入口、通用商务邮箱或官方表单。相同公司、模式、渠道和联系入口会 upsert。`evidence_refs` 至少包含一个证据 ID、原始 URL 或用户提供资料的清晰引用。`approved` 只是人工审核状态，不会触发发送；`sent` 和 `replied` 只用于事后记录。
 
@@ -223,6 +239,8 @@ python3 scripts/wm_crm.py export --db .wm/wm.db --out-dir .wm/export
 `campaign_type` 取值 `prospecting`、`reengagement`、`quote_followup` 或 `post_sale`；`status` 取值 `draft`、`review_ready`、`approved` 或 `archived`。Campaign 按规范化名称 upsert，受众、语言、主题、抑制规则和指标必须是非空字符串数组。`approved` 只记录内部审核状态，不触发发送。
 
 ## 校验与导出
+
+1.0.2 首次打开旧库时自动以默认值增加项目来源和社媒字段，不重建、不删除原表/原记录；迁移可重复执行。升级前建议备份数据库。现有九份 CSV 文件保持名称，项目与社媒 CSV 增加字段；下游应按列名读取，不依赖固定列数。原始 JSON/CSV 不添加作者推广行，格式化报告按输出署名规则处理。
 
 `validate` 检查枚举、分项总分、合格阈值、合格记录的必要证据、联系方式状态和悬空记录。错误返回非零退出码；警告需要在交付中披露，但不一定阻止继续研究。
 

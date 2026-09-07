@@ -28,11 +28,14 @@ EMAIL_STATUSES = {"confirmed_on_source", "verified_by_service", "pattern_inferre
 PHONE_STATUSES = {"confirmed_on_source", "unverified", "not_found"}
 SOURCE_TYPES = {"official", "registry", "company_social", "professional_network", "trade_source", "news", "directory", "other"}
 CONFIDENCES = {"high", "medium", "low"}
-SOCIAL_PLATFORMS = {"linkedin", "facebook", "instagram", "tiktok", "pinterest", "youtube", "x", "whatsapp", "other"}
+MESSAGING_PLATFORMS = {"whatsapp", "zalo", "line", "vk", "telegram", "wechat", "kakaotalk", "viber", "messenger", "instagram_dm"}
+SOCIAL_PLATFORMS = {"linkedin", "facebook", "instagram", "tiktok", "pinterest", "youtube", "x", "other"} | MESSAGING_PLATFORMS
+LEAD_SOURCES = {"google", "importyeti", "canadian_importers_database", "industry_directory", "community", "other"}
+SOURCE_SELECTIONS = {"pending", "operator_choice"}
 SOCIAL_STATUSES = {"official_linked", "claimed_unverified", "not_found"}
 SOCIAL_ACTIVITY = {"not_checked", "recently_active", "inactive", "not_found"}
 OUTREACH_MODES = {"first_touch", "reengagement", "quote", "post_sale"}
-OUTREACH_CHANNELS = {"email", "linkedin", "whatsapp", "official_form", "phone", "other"}
+OUTREACH_CHANNELS = {"email", "linkedin", "official_form", "phone", "other"} | MESSAGING_PLATFORMS
 COMPANY_SIZES = {"micro", "small", "medium", "large", "unknown"}
 ROUTE_CONFIDENCES = {"high", "medium", "low", "blocked"}
 OUTREACH_STATUSES = {"draft", "review_ready", "approved", "sent", "replied", "paused", "closed"}
@@ -237,6 +240,21 @@ CREATE INDEX IF NOT EXISTS idx_campaign_status ON campaign_plans(status, planned
 """
 
 
+ADDITIVE_COLUMNS = {
+    "project": {
+        "lead_sources": "TEXT NOT NULL DEFAULT '[]'",
+        "source_selection": "TEXT NOT NULL DEFAULT 'pending'",
+        "source_notes": "TEXT NOT NULL DEFAULT ''",
+    },
+    "social_profiles": {
+        "country": "TEXT NOT NULL DEFAULT ''",
+        "language": "TEXT NOT NULL DEFAULT ''",
+        "public_handle": "TEXT NOT NULL DEFAULT ''",
+        "source_url": "TEXT NOT NULL DEFAULT ''",
+    },
+}
+
+
 class UserError(ValueError):
     pass
 
@@ -324,7 +342,7 @@ def require_text(data: dict, field: str) -> str:
 def enum_value(value: object, field: str, allowed: set[str], allow_none: bool = False) -> str | None:
     if value is None and allow_none:
         return None
-    if value not in allowed:
+    if not isinstance(value, str) or value not in allowed:
         raise UserError(f"{field} must be one of: {', '.join(sorted(allowed))}")
     return str(value)
 
@@ -386,6 +404,13 @@ def open_db(path: str, create: bool = False) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    # Add defaulted columns without replacing legacy tables or their records.
+    with conn:
+        for table, columns in ADDITIVE_COLUMNS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, declaration in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
     return conn
 
 
@@ -436,14 +461,30 @@ def project_as_dict(row: sqlite3.Row) -> dict:
         "stage": row["stage"],
         "qualify_threshold": row["qualify_threshold"],
         "notes": row["notes"],
+        "lead_sources": decode_json_column(row["lead_sources"], []),
+        "source_selection": row["source_selection"],
+        "source_notes": row["source_notes"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
 
 
+def validate_source_selection(data: dict) -> list[str]:
+    sources = json_list(data.get("lead_sources"), "lead_sources")
+    clean = list(dict.fromkeys(enum_value(value, "lead_sources", LEAD_SOURCES) for value in sources))
+    selection = enum_value(data.get("source_selection"), "source_selection", SOURCE_SELECTIONS)
+    if selection == "operator_choice" and not clean:
+        raise UserError("operator_choice requires at least one lead source")
+    if selection == "pending" and clean:
+        raise UserError("pending source selection requires an empty lead_sources array")
+    if not isinstance(data.get("source_notes", ""), str):
+        raise UserError("source_notes must be a string")
+    return clean
+
+
 def command_set_project(args: argparse.Namespace) -> None:
     data = read_json_object(args.json_file)
-    allowed = {"project_name", "product", "countries", "customer_types", "exclusions", "stage", "qualify_threshold", "notes"}
+    allowed = {"project_name", "product", "countries", "customer_types", "exclusions", "stage", "qualify_threshold", "notes", "lead_sources", "source_selection", "source_notes"}
     unknown = set(data) - allowed
     if unknown:
         raise UserError(f"Unknown project fields: {', '.join(sorted(unknown))}")
@@ -459,13 +500,16 @@ def command_set_project(args: argparse.Namespace) -> None:
         merged["qualify_threshold"] = integer_value(merged.get("qualify_threshold"), "qualify_threshold", 1, 100)
         if not isinstance(merged.get("notes", ""), str):
             raise UserError("notes must be a string")
+        merged["lead_sources"] = validate_source_selection(merged)
         conn.execute(
             """UPDATE project SET project_name=?, product=?, countries=?, customer_types=?,
-               exclusions=?, stage=?, qualify_threshold=?, notes=?, updated_at=? WHERE id=1""",
+               exclusions=?, stage=?, qualify_threshold=?, notes=?, lead_sources=?,
+               source_selection=?, source_notes=?, updated_at=? WHERE id=1""",
             (
                 merged["project_name"], merged["product"], json_text(merged["countries"]),
                 json_text(merged["customer_types"]), json_text(merged["exclusions"]), merged["stage"],
-                merged["qualify_threshold"], merged["notes"], now_iso(),
+                merged["qualify_threshold"], merged["notes"], json_text(merged["lead_sources"]),
+                merged["source_selection"], merged["source_notes"], now_iso(),
             ),
         )
         emit({"project": project_as_dict(project_row(conn))})
@@ -658,10 +702,33 @@ def social_from_row(row: sqlite3.Row) -> dict:
         "platform": row["platform"], "profile_url": row["profile_url"],
         "verification_status": row["verification_status"], "activity_status": row["activity_status"],
         "audience_notes": row["audience_notes"],
+        **{field: row[field] for field in ADDITIVE_COLUMNS["social_profiles"]},
         "content_signals": decode_json_column(row["content_signals"], []),
         "last_checked_at": row["last_checked_at"], "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def validate_social_details(data: dict) -> dict:
+    details = {}
+    for field in ADDITIVE_COLUMNS["social_profiles"]:
+        value = data.get(field, "")
+        if not isinstance(value, str):
+            raise UserError(f"{field} must be a string")
+        details[field] = value.strip()
+    details["source_url"] = validate_url(details["source_url"], "source_url", allow_empty=True)
+    profile_url = data.get("profile_url", "")
+    handle = details["public_handle"]
+    status = data["verification_status"]
+    if status == "official_linked" and not (profile_url or handle):
+        raise UserError("official_linked social profiles require profile_url or public_handle")
+    if status == "not_found" and (profile_url or handle):
+        raise UserError("not_found social profiles cannot have profile_url or public_handle")
+    if handle and (not details["source_url"] or not data.get("last_checked_at")):
+        raise UserError("public_handle requires source_url and last_checked_at")
+    if data.get("activity_status") == "not_found" and status != "not_found":
+        raise UserError("activity_status not_found requires verification_status not_found")
+    return details
 
 
 def command_upsert_social(args: argparse.Namespace) -> None:
@@ -669,7 +736,7 @@ def command_upsert_social(args: argparse.Namespace) -> None:
     allowed = {
         "entity_type", "entity_key", "platform", "profile_url", "verification_status",
         "activity_status", "audience_notes", "content_signals", "last_checked_at",
-    }
+    } | set(ADDITIVE_COLUMNS["social_profiles"])
     unknown = set(data) - allowed
     if unknown:
         raise UserError(f"Unknown social profile fields: {', '.join(sorted(unknown))}")
@@ -679,10 +746,6 @@ def command_upsert_social(args: argparse.Namespace) -> None:
     verification_status = enum_value(data.get("verification_status"), "verification_status", SOCIAL_STATUSES)
     activity_status = enum_value(data.get("activity_status", "not_checked"), "activity_status", SOCIAL_ACTIVITY)
     profile_url = validate_url(data.get("profile_url"), "profile_url", allow_empty=True)
-    if verification_status == "official_linked" and not profile_url:
-        raise UserError("official_linked social profiles require profile_url")
-    if verification_status == "not_found" and profile_url:
-        raise UserError("not_found social profiles cannot have profile_url")
     if activity_status == "not_found" and verification_status != "not_found":
         raise UserError("activity_status not_found requires verification_status not_found")
     audience_notes = data.get("audience_notes", "")
@@ -695,18 +758,25 @@ def command_upsert_social(args: argparse.Namespace) -> None:
         if conn.execute(f"SELECT id FROM {table} WHERE domain=?", (entity_key,)).fetchone() is None:
             raise UserError(f"{entity_type} not found for social profile key: {entity_key}")
         existing = conn.execute(
-            "SELECT id FROM social_profiles WHERE entity_type=? AND entity_key=? AND platform=?",
+            "SELECT * FROM social_profiles WHERE entity_type=? AND entity_key=? AND platform=?",
             (entity_type, entity_key, platform),
         ).fetchone()
+        details = validate_social_details({
+            **(dict(existing) if existing else {}), **data,
+            "profile_url": profile_url, "verification_status": verification_status,
+            "activity_status": activity_status, "last_checked_at": last_checked_at,
+        })
         timestamp = now_iso()
         values = (
             profile_url, verification_status, activity_status, audience_notes,
-            json_text(content_signals), last_checked_at, timestamp,
+            json_text(content_signals), last_checked_at, details["country"], details["language"],
+            details["public_handle"], details["source_url"], timestamp,
         )
         if existing:
             conn.execute(
                 """UPDATE social_profiles SET profile_url=?, verification_status=?, activity_status=?,
-                   audience_notes=?, content_signals=?, last_checked_at=?, updated_at=? WHERE id=?""",
+                   audience_notes=?, content_signals=?, last_checked_at=?, country=?, language=?,
+                   public_handle=?, source_url=?, updated_at=? WHERE id=?""",
                 (*values, existing["id"]),
             )
             social_id = existing["id"]
@@ -715,10 +785,10 @@ def command_upsert_social(args: argparse.Namespace) -> None:
             cursor = conn.execute(
                 """INSERT INTO social_profiles
                    (entity_type, entity_key, platform, profile_url, verification_status, activity_status,
-                    audience_notes, content_signals, last_checked_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entity_type, entity_key, platform, profile_url, verification_status, activity_status,
-                 audience_notes, json_text(content_signals), last_checked_at, timestamp, timestamp),
+                    audience_notes, content_signals, last_checked_at, country, language,
+                    public_handle, source_url, updated_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entity_type, entity_key, platform, *values, timestamp),
             )
             social_id = cursor.lastrowid
             action = "created"
@@ -1229,6 +1299,10 @@ def command_validate(args: argparse.Namespace) -> None:
     with open_db(args.db) as conn:
         project = project_as_dict(project_row(conn))
         threshold = project["qualify_threshold"]
+        try:
+            validate_source_selection(project)
+        except UserError as exc:
+            add_issue(errors, "invalid_source_selection", str(exc), "project")
         companies = conn.execute("SELECT * FROM companies ORDER BY id").fetchall()
         for row in companies:
             entity = f"company:{row['domain']}"
@@ -1302,6 +1376,10 @@ def command_validate(args: argparse.Namespace) -> None:
         social_profiles = conn.execute("SELECT * FROM social_profiles ORDER BY id").fetchall()
         for row in social_profiles:
             entity = f"social:{row['id']}"
+            try:
+                validate_social_details(dict(row))
+            except UserError as exc:
+                add_issue(errors, "invalid_social_details", str(exc), entity)
             if row["platform"] not in SOCIAL_PLATFORMS:
                 add_issue(errors, "invalid_social_platform", row["platform"], entity)
             if row["verification_status"] not in SOCIAL_STATUSES:
@@ -1456,7 +1534,7 @@ def command_export(args: argparse.Namespace) -> None:
     with open_db(args.db) as conn:
         project = project_as_dict(project_row(conn))
         project_export = {**project}
-        for key in ("countries", "customer_types", "exclusions"):
+        for key in ("countries", "customer_types", "exclusions", "lead_sources"):
             project_export[key] = json_text(project_export[key])
         write_csv(out_dir / "project.csv", list(project_export), [project_export])
 
@@ -1497,6 +1575,7 @@ def command_export(args: argparse.Namespace) -> None:
         social_fields = [
             "id", "entity_type", "entity_key", "platform", "profile_url", "verification_status",
             "activity_status", "audience_notes", "content_signals", "last_checked_at", "created_at", "updated_at",
+            "country", "language", "public_handle", "source_url",
         ]
         write_csv(out_dir / "social_profiles.csv", social_fields, social_profiles)
 
